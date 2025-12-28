@@ -13,27 +13,24 @@ void ChangeEndianness(DnsHeader* header) {
 
 std::string ParseName(const unsigned char* buffer, int& pos, int len) {
     std::string name;
-    bool jumped = false;
-    int old_pos = -1;
     int i = pos;
+    bool jumped = false;
+    int next_pos = -1;
 
     while (i < len) {
         uint8_t len_byte = buffer[i];
-
         if (len_byte == 0) {
             i++;
-            if (!jumped) pos = i;
-            return name;
+            break;
         }
 
         if ((len_byte & 0xC0) == 0xC0) {
             if (!jumped) {
-                pos = i + 2;
-                old_pos = pos;
-                jumped = true;
+                next_pos = i + 2;
             }
             uint16_t offset = ((len_byte & 0x3F) << 8) | buffer[i + 1];
             i = offset;
+            jumped = true;
         } else {
             i++;
             if (!name.empty()) name += ".";
@@ -43,7 +40,12 @@ std::string ParseName(const unsigned char* buffer, int& pos, int len) {
             i += len_byte;
         }
     }
-    if (!jumped) pos = i;
+
+    if (jumped) {
+        pos = next_pos;
+    } else {
+        pos = i;
+    }
     return name;
 }
 

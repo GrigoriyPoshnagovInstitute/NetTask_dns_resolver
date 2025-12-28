@@ -24,11 +24,10 @@ private:
     bool debug_mode;
     std::map<std::string, CacheEntry> cache;
     std::vector<std::string> root_servers;
-
     std::vector<DnsRecord> QueryServer(const std::string& ip, const std::string& domain, uint16_t type);
     std::vector<DnsRecord> SendUdp(const std::string& ip, const std::vector<uint8_t>& packet);
     std::vector<DnsRecord> SendTcp(const std::string& ip, const std::vector<uint8_t>& packet);
-    std::vector<DnsRecord> ParseResponse(const std::vector<uint8_t>& response, int query_len);
+    std::vector<DnsRecord> ParseResponse(const std::vector<uint8_t>& response);
 
     uint16_t StringToType(const std::string& type);
     std::string TypeToString(uint16_t type);

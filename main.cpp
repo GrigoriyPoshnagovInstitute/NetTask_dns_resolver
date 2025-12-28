@@ -11,7 +11,6 @@ int main(int argc, char* argv[]) {
     }
 
     std::string arg1 = argv[1];
-
     Resolver res;
 
     if (arg1 == "clear-cache") {
