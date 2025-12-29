@@ -38,46 +38,62 @@ uint16_t Resolver::StringToType(const std::string& type) {
 
 std::string Resolver::TypeToString(uint16_t type) {
     switch (type) {
-        case A: return "A";
-        case NS: return "NS";
-        case CNAME: return "CNAME";
-        case AAAA: return "AAAA";
-        default: return std::to_string(type);
+    case A: return "A";
+    case NS: return "NS";
+    case CNAME: return "CNAME";
+    case AAAA: return "AAAA";
+    default: return std::to_string(type);
     }
 }
 
 void Resolver::Run(const std::string& domain, const std::string& type_str) {
     uint16_t qtype = StringToType(type_str);
-    std::string key = domain + "_" + std::to_string(qtype);
+    std::vector<DnsRecord> result = Resolve(domain, qtype);
+
+    if (result.empty()) {
+        std::cout << "Failed to resolve or no records found." << std::endl;
+    } else {
+        PrintRecords(result);
+    }
+}
+
+std::vector<DnsRecord> Resolver::Resolve(const std::string& domain, uint16_t type) {
+    std::string key = domain + "_" + std::to_string(type);
 
     if (cache.count(key)) {
         if (time(nullptr) < cache[key].expires_at) {
-            std::cout << "[Cache Hit]" << std::endl;
-            PrintRecords(cache[key].records);
-            return;
+            if (debug_mode) std::cout << "[Cache Hit] " << domain << std::endl;
+            return cache[key].records;
         } else {
             cache.erase(key);
         }
     }
 
     std::string current_ns_ip = "";
+    bool root_found = false;
+
     for (const auto& root : root_servers) {
-        current_ns_ip = root;
         if (debug_mode) std::cout << "Trying root server: " << root << std::endl;
-        auto initial_resp = QueryServer(current_ns_ip, domain, qtype);
-        if (!initial_resp.empty()) break;
+        auto initial_resp = QueryServer(root, domain, type);
+        if (!initial_resp.empty()) {
+            current_ns_ip = root;
+            root_found = true;
+            break;
+        }
     }
 
-    std::string target_domain = domain;
-    bool solved = false;
+    if (!root_found) return {};
 
-    while (!solved) {
+    std::string target_domain = domain;
+    int max_steps = 20;
+
+    while (max_steps-- > 0) {
         if (debug_mode) std::cout << "Querying " << current_ns_ip << " for " << target_domain << std::endl;
-        std::vector<DnsRecord> response = QueryServer(current_ns_ip, target_domain, qtype);
+        std::vector<DnsRecord> response = QueryServer(current_ns_ip, target_domain, type);
 
         if (response.empty()) {
-            std::cerr << "No response from " << current_ns_ip << std::endl;
-            return;
+            if (debug_mode) std::cerr << "No response from " << current_ns_ip << std::endl;
+            return {};
         }
 
         bool found_answer = false;
@@ -85,7 +101,7 @@ void Resolver::Run(const std::string& domain, const std::string& type_str) {
         std::map<std::string, std::string> glue;
 
         for (const auto& rec : response) {
-            if (rec.type == qtype && rec.name == target_domain) {
+            if (rec.type == type && rec.name == target_domain) {
                 found_answer = true;
             }
             if (rec.type == NS) {
@@ -94,21 +110,31 @@ void Resolver::Run(const std::string& domain, const std::string& type_str) {
             if (rec.type == A) {
                 glue[rec.name] = rec.parsed_data;
             }
+            if (rec.type == CNAME && type != CNAME && rec.name == target_domain) {
+                target_domain = rec.parsed_data;
+                current_ns_ip = root_servers[0];
+                if (debug_mode) std::cout << "Restarting for CNAME: " << target_domain << std::endl;
+                max_steps = 20;
+                found_answer = false;
+                referrals.clear();
+                break;
+            }
         }
 
         if (found_answer) {
             std::vector<DnsRecord> answers;
             uint32_t min_ttl = 3600;
             for (const auto& rec : response) {
-                if (rec.type == qtype) {
+                if (rec.type == type) {
                     answers.push_back(rec);
                     if (rec.ttl < min_ttl) min_ttl = rec.ttl;
                 }
             }
-            cache[key] = {answers, time(nullptr) + min_ttl};
-            PrintRecords(answers);
-            solved = true;
-        } else if (!referrals.empty()) {
+            cache[key] = { answers, time(nullptr) + min_ttl };
+            return answers;
+        }
+
+        if (!referrals.empty()) {
             bool glue_found = false;
             for (const auto& ns : referrals) {
                 if (glue.count(ns)) {
@@ -117,18 +143,25 @@ void Resolver::Run(const std::string& domain, const std::string& type_str) {
                     break;
                 }
             }
+
             if (!glue_found) {
-                if (debug_mode) std::cout << "Resolving glue for " << referrals[0] << std::endl;
-                Resolver sub_res;
-                sub_res.SetDebug(debug_mode);
-                sub_res.Run(referrals[0], "A");
-                return;
+                if (debug_mode) std::cout << "No glue found for NS " << referrals[0] << ". Resolving NS IP..." << std::endl;
+
+                std::vector<DnsRecord> ns_ips = Resolve(referrals[0], A);
+
+                if (!ns_ips.empty()) {
+                    current_ns_ip = ns_ips[0].parsed_data;
+                    if (debug_mode) std::cout << "Resolved NS " << referrals[0] << " to " << current_ns_ip << std::endl;
+                } else {
+                    if (debug_mode) std::cerr << "Failed to resolve NS " << referrals[0] << std::endl;
+                    return {};
+                }
             }
         } else {
-            std::cout << "NXDOMAIN or no records found." << std::endl;
-            return;
+            return {};
         }
     }
+    return {};
 }
 
 std::vector<DnsRecord> Resolver::QueryServer(const std::string& ip, const std::string& domain, uint16_t type) {
@@ -206,7 +239,7 @@ std::vector<DnsRecord> Resolver::SendTcp(const std::string& ip, const std::vecto
         closesocket(sock);
         return {};
     }
-    uint16_t resp_len = ntohs(*(uint16_t*)len_buf);
+    uint16_t resp_len = ntohs((uint16_t&)*len_buf);
 
     std::vector<uint8_t> buf(resp_len);
     int total = 0;
@@ -227,7 +260,7 @@ std::vector<DnsRecord> Resolver::ParseResponse(const std::vector<uint8_t>& respo
     int pos = sizeof(DnsHeader);
 
     int q_count = ntohs(h->q_count);
-    for(int i=0; i<q_count; ++i) {
+    for (int i = 0; i < q_count; ++i) {
         ParseName(response.data(), pos, (int)response.size());
         pos += 4;
     }
@@ -247,13 +280,15 @@ std::vector<DnsRecord> Resolver::ParseResponse(const std::vector<uint8_t>& respo
 
         if (rec.type == A && rdlength == 4) {
             char ip[16];
-            snprintf(ip, sizeof(ip), "%d.%d.%d.%d", response[pos], response[pos+1], response[pos+2], response[pos+3]);
+            snprintf(ip, sizeof(ip), "%d.%d.%d.%d", response[pos], response[pos + 1], response[pos + 2], response[pos + 3]);
             rec.parsed_data = ip;
-        } else if (rec.type == AAAA && rdlength == 16) {
+        }
+        else if (rec.type == AAAA && rdlength == 16) {
             char ip6[46];
             inet_ntop(AF_INET6, &response[pos], ip6, sizeof(ip6));
             rec.parsed_data = ip6;
-        } else if (rec.type == NS || rec.type == CNAME) {
+        }
+        else if (rec.type == NS || rec.type == CNAME) {
             int tmp = pos;
             rec.parsed_data = ParseName(response.data(), tmp, (int)response.size());
         }

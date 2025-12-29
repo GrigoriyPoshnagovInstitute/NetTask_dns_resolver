@@ -1,5 +1,4 @@
 #include "DnsProtocol.h"
-#include <winsock2.h>
 #include <iostream>
 
 void ChangeEndianness(DnsHeader* header) {
